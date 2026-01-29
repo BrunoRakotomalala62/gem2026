@@ -22,7 +22,6 @@ class GeminiSession:
             return self.session, self.token
         
         cookies = {}
-        # Assurez-vous que le fichier de cookies existe et est lisible
         if not os.path.exists(COOKIES_FILE):
             raise Exception(f"Fichier de cookies non trouvé: {COOKIES_FILE}")
 
@@ -30,14 +29,11 @@ class GeminiSession:
             for line in f:
                 if not line.startswith('#') and line.strip():
                     parts = line.strip().split('\t')
-                    # Vérification de la longueur des parties pour éviter IndexError
                     if len(parts) >= 7: 
-                        # Le 6ème élément (index 5) est le nom du cookie, le 7ème (index 6) est la valeur
                         cookies[parts[5]] = parts[6]
         
         self.session = requests.Session()
         for n, v in cookies.items(): 
-            # Assurez-vous que le domaine est correct pour l'injection de cookies
             self.session.cookies.set(n, v, domain=".google.com")
         
         headers = {
@@ -45,7 +41,6 @@ class GeminiSession:
             "Referer": "https://gemini.google.com/app"
         }
         
-        # Tentative de récupération du token SNlM0e avec un timeout plus généreux pour Render
         resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=30)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text)
         if not match: raise Exception("Auth failed: SNlM0e token not found. Check cookies.")
@@ -55,45 +50,8 @@ class GeminiSession:
         return self.session, self.token
 
     def upload_image(self, image_path: str, token: str):
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image non trouvée: {image_path}")
-
-        mime_type, _ = mimetypes.guess_type(image_path)
-        if not mime_type or not mime_type.startswith('image/'):
-            raise ValueError(f"Type de fichier non supporté ou non détecté: {mime_type}")
-
-        # L'URL d'upload correcte pour Gemini Web
-        upload_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-        
-        # Le payload d'upload est un formulaire multipart
-        files = {
-            'upload_file': (os.path.basename(image_path), open(image_path, 'rb'), mime_type)
-        }
-        
-        # Le token est passé dans les données du formulaire
-        data = {
-            'at': token
-        }
-
-        # En réalité, l'upload dans l'interface web est complexe. 
-        # Pour un wrapper simple, on va plutôt utiliser l'URL de l'image directement dans le prompt 
-        # si l'upload échoue, mais avec une structure de message plus riche.
-        return None # Simulation d'échec d'upload pour fallback sur URL prompt
-        
-        # La réponse est souvent préfixée par des caractères de sécurité
-        if upload_resp.text.startswith(")]}'\n"):
-            response_text = upload_resp.text[5:]
-            try:
-                # La réponse est un tableau JSON imbriqué
-                response_json = json.loads(response_text)
-                # Le File ID est généralement dans la structure [0][0]
-                file_id = response_json[0][0]
-                return file_id
-            except (json.JSONDecodeError, IndexError, TypeError) as e:
-                raise Exception(f"Erreur de décodage de la réponse d'upload: {e}. Réponse brute: {upload_resp.text}")
-        else:
-            raise Exception(f"Réponse d'upload inattendue: {upload_resp.text}")
-
+        # Simulation d'upload pour fallback sur URL prompt (comme dans l'original)
+        return None
 
 gemini_auth = GeminiSession()
 
@@ -109,74 +67,51 @@ def extract_text(raw_line):
         return None
     except: return None
 
+def extract_image_urls(raw_line):
+    """Extrait les URLs d'images des réponses Gemini"""
+    urls = []
+    try:
+        if "wrb.fr" in raw_line:
+            data = json.loads(raw_line)
+            inner = json.loads(data[0][2])
+            # Recherche récursive d'URLs d'images dans la structure complexe
+            content_str = str(inner)
+            found_urls = re.findall(r'https://lh3\.googleusercontent\.com/[a-zA-Z0-9\-_=]+', content_str)
+            for url in found_urls:
+                if url not in urls:
+                    urls.append(url)
+    except: pass
+    return urls
+
 @app.get("/gemini")
 async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optional[str] = None):
     start_time = time.time()
     file_id = None
-    temp_image_path = None
     
     try:
         session, token = gemini_auth.refresh()
         
-        # 1. Gestion de l'image (URL ou Chemin local)
         if image:
-            if image.startswith("http"):
-                print(f"Téléchargement de l'image depuis l'URL: {image}")
-                img_resp = requests.get(image, timeout=15)
-                if img_resp.status_code == 200:
-                    temp_image_path = f"/tmp/temp_image_{int(time.time())}.jpg"
-                    with open(temp_image_path, 'wb') as f:
-                        f.write(img_resp.content)
-                    image_to_upload = temp_image_path
-                else:
-                    raise Exception(f"Impossible de télécharger l'image: {img_resp.status_code}")
-            else:
-                image_to_upload = image
-
-            print(f"Tentative d'upload de l'image: {image_to_upload}")
-            file_id = gemini_auth.upload_image(image_to_upload, token)
-            print(f"Image uploadée avec succès. File ID: {file_id}")
-
-        # 2. Construction du payload
-        # Si on a une URL d'image mais pas de file_id (upload échoué ou non supporté), 
-        # on l'intègre au prompt de manière explicite pour Gemini.
-        if image and not file_id:
+            # Fallback sur URL dans le prompt si l'upload n'est pas implémenté
             prompt = f"[Image: {image}]\n\n{prompt}"
 
         req = [[prompt], None, ["", "", ""]]
-        
-        if file_id:
-            image_data = [file_id, 1, 1]
-            req = [[prompt, [image_data]], None, ["", "", ""]]
-            
         payload = {"f.req": json.dumps([None, json.dumps(req)]), "at": token}
-        
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
         
-        # Ajustement pour Render : On augmente le timeout de lecture à 60s pour éviter le ReadTimeout
-        # tout en gardant un timeout de connexion court (10s).
         resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
         
         answer = None
-        # On cherche la réponse finale plus efficacement
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
-                # On cherche directement la ligne contenant la réponse textuelle
                 if "wrb.fr" in decoded_line:
                     res = extract_text(decoded_line)
                     if res:
                         answer = res
-                        # On ne s'arrête pas forcément à la première ligne si c'est un stream partiel
-                        # Mais pour la rapidité, on prend la première réponse complète trouvée
                         break
-        
         resp.close()
         
-        # Nettoyage du fichier temporaire
-        if temp_image_path and os.path.exists(temp_image_path):
-            os.remove(temp_image_path)
-            
         return {
             "status": "success",
             "uid": uid,
@@ -184,8 +119,61 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
             "execution_time": f"{round(time.time() - start_time, 2)}s"
         }
     except Exception as e:
-        # Afficher l'erreur dans la console pour le débogage
-        print(f"Erreur critique: {e}")
+        import traceback
+        print(f"Erreur: {e}")
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+@app.get("/nanobanana")
+async def nanobanana_endpoint(prompt: str, image: str, uid: Optional[str] = None):
+    """
+    Route spécifique pour le modèle Nano Banana.
+    Prend une image et un prompt, et retourne l'URL de l'image générée.
+    """
+    start_time = time.time()
+    
+    try:
+        session, token = gemini_auth.refresh()
+        
+        # Pour Nano Banana, on demande explicitement à Gemini de modifier l'image
+        # et on s'assure que le prompt mentionne la modification.
+        full_prompt = f"Utilise le modèle Nano Banana pour modifier cette image: {image}. Instruction: {prompt}. Retourne uniquement l'image modifiée."
+
+        req = [[full_prompt], None, ["", "", ""]]
+        payload = {"f.req": json.dumps([None, json.dumps(req)]), "at": token}
+        url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+        
+        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
+        
+        image_url = None
+        lines = []
+        for line in resp.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                lines.append(decoded_line)
+                if "wrb.fr" in decoded_line:
+                    urls = extract_image_urls(decoded_line)
+                    if urls:
+                        image_url = urls[0]
+                        break
+        resp.close()
+        
+        if not image_url:
+            for decoded_line in lines:
+                text = extract_text(decoded_line)
+                if text:
+                    found = re.search(r'https://lh3\.googleusercontent\.com/[a-zA-Z0-9\-_=]+', text)
+                    if found:
+                        image_url = found.group(0)
+                        break
+
+        return {
+            "resultats": image_url or "Aucune image générée ou URL non trouvée"
+        }
+    except Exception as e:
+        import traceback
+        print(f"Erreur: {e}")
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
