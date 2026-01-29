@@ -76,7 +76,7 @@ def extract_image_urls(raw_line):
             inner = json.loads(data[0][2])
             # Recherche récursive d'URLs d'images dans la structure complexe
             content_str = str(inner)
-            found_urls = re.findall(r'https://lh3\.googleusercontent\.com/[a-zA-Z0-9\-_=]+', content_str)
+            found_urls = re.findall(r'https://lh3\.googleusercontent\.com/[a-zA-Z0-9\-_/=]+', content_str)
             for url in found_urls:
                 if url not in urls:
                     urls.append(url)
@@ -162,7 +162,7 @@ async def nanobanana_endpoint(prompt: str, image: str, uid: Optional[str] = None
             for decoded_line in lines:
                 text = extract_text(decoded_line)
                 if text:
-                    found = re.search(r'https://lh3\.googleusercontent\.com/[a-zA-Z0-9\-_=]+', text)
+                    found = re.search(r'https://lh3\.googleusercontent\.com/[a-zA-Z0-9\-_/=]+', text)
                     if found:
                         image_url = found.group(0)
                         break
